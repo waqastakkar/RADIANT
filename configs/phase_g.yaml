@@ -1,0 +1,198 @@
+# Phase G -- Compute-aware analyses orchestrator config.
+#
+# Every block under the top level is optional; missing blocks skip that
+# analysis. G.0 (validation metrics) and the two cross-cutting analyses
+# (`pairwise` and `compute_parity`) always run because they only need
+# the panel root.
+#
+# Paths below point at the actual panel layout produced by
+# `radiant_qsar.finetune.single_task` (model dir is `radiant`, not
+# `radiant_full`).
+
+panel_root: runs/panel
+out_dir:    runs/phase_g
+descriptors: data/processed/v1/descriptors.parquet
+
+# G.0 -- Model validation metrics.
+# Always runs. Computes MAE/RMSE/R²/Pearson/Spearman for every
+# model × target × split cell. Produces parity grid, comparison bars, heatmaps.
+# Optional: restrict to one model with g0.model.
+# g0:
+#   model: radiant   # omit to evaluate all models
+
+# G.1 -- RADIANT depth vs complexity (Sub-claim C1).
+# Panel mode: auto-discovers all 100 radiant/*/predictions.csv cells
+# under panel_root and aggregates Spearman ρ across all target/split pairs.
+# To run single-cell instead, replace `panel_root` with:
+#   predictions: runs/panel/radiant/CHEMBL203/scaffold/predictions.csv
+g1:
+  panel_root: runs/panel
+  n_bootstrap: 500               # per-cell bootstraps; 500 is enough for aggregate stats
+
+# G.3 -- Calibration. Needs a long CSV with sigma_pchembl + model
+# columns. Build it upstream with mc_loops_to_sigma / ensemble_to_sigma /
+# halt_var_to_sigma and concatenate.
+g3:
+  predictions: runs/phase_g/_inputs/calibration_long.csv
+
+# G.4 -- Test-time loop sweep across all 20 targets.
+# Panel mode: re-runs best.pt for each target at each n_loops value.
+# Results are cached in <cell>/loop_sweep/ so the run is resumable.
+# Requires: config + vocab must match the pretrain checkpoint used for all cells.
+g4:
+  panel_root: runs/panel
+  split: scaffold
+  # Match the user's request: 1, 2, 4, 8, 12, 16 (24 was overkill).
+  loops: [1, 2, 4, 8, 12, 16]
+  config: configs/radiant_75m.json
+  # IMPORTANT: must be the training-time vocab. data/processed/v1/smiles_vocab.json
+  # is the fine-tune-corpus vocab (102 tokens) which does NOT match the trained
+  # token_embed (157 tokens) and produced a size-mismatch RuntimeError.
+  vocab: data/zinc20/smiles_vocab.json
+  bin_descriptor: BertzCT
+  n_bins: 4
+  device: cuda
+  batch_size: 64
+
+# G.5 -- Per-atom halt-step attribution across all 20 targets.
+# Panel mode: reads tokens + halt_step from existing predictions.csv
+# (no checkpoint needed). Generates n_case_studies_per_target heatmaps per target.
+g5:
+  panel_root: runs/panel
+  split: scaffold
+  n_case_studies_per_target: 2
+  mmp_delta: 1.0
+  mmp_tanimoto: 0.7
+
+# R-group SAR -- checks same-scaffold substituent potency deltas.
+rgroup_sar:
+  panel_root: runs/panel
+  model: radiant
+  # NOTE: scaffold split places same-scaffold compounds entirely in train,
+  # so the test set has no same-scaffold pairs. Use random (or time) so
+  # the test set contains the substituent variations this analysis needs.
+  split: random
+  min_abs_true_delta: 0.3
+  max_pairs_per_scaffold: 250
+
+# Activity-cliff SAR -- checks high-similarity pairs with large potency deltas.
+activity_cliff_sar:
+  panel_root: runs/panel
+  model: radiant
+  split: activity_cliff
+  tanimoto_threshold: 0.55
+  activity_delta_threshold: 1.0
+  max_pairs_per_cell: 2000
+
+# Failure modes -- worst compounds, worst cells, and worst scaffolds.
+failure_modes:
+  panel_root: runs/panel
+  model: radiant
+  top_n: 100
+  min_scaffold_n: 3
+
+# Stage-1 representation probe. Export embeddings to this CSV when a
+# production Stage-1 checkpoint is available. Columns: smiles, emb_0...
+# stage1_probe:
+#   embeddings_csv: runs/phase_g/_inputs/stage1_embeddings.csv
+#   k: 5
+
+# R-group chemistry ablation. Runs once panel_results.csv contains the
+# no-R-group ablation runs.
+rgroup_ablation:
+  panel_results: runs/panel/panel_results.csv
+  primary: radiant
+  ablations:
+    - radiant_no_stage1_rgroup
+    - radiant_no_stage2_rgroup
+    - radiant_no_rgroup
+
+# Cross-cutting: pairwise wins — always uses the full panel root.
+pairwise:
+  n_bootstrap: 10000
+  bin_descriptor: BertzCT
+  n_bins: 4
+
+# Cross-cutting: compute parity. Label-permutation sanity check now
+# pools ALL LF scaffold cells automatically from panel_root — no single
+# cell path needed.
+compute_parity:
+  params_flops_csv: runs/panel/params_flops.csv
+  n_bootstrap: 10000
+  n_perm: 200
+
+# ---------------------------------------------------------------------
+# Manuscript-grade stats and slicer modules. All read
+# `runs/phase_g/g0_validation_metrics/tables/g0_cell_metrics.csv`
+# (or per-cell result.json for training curves). Set `enabled: false`
+# under any block to skip it.
+# ---------------------------------------------------------------------
+
+# Per-epoch training+validation curves (RADIANT only — baselines don't
+# write per-epoch history). Outputs the 20-target grid + aggregate panels.
+training_curves:
+  model: radiant
+
+# Average rank per model + Demsar critical-difference (CD) diagram per
+# metric (MAE, R2, Pearson, Spearman). Per-split heatmaps + per-class
+# breakdown (target_class joined from data/processed/v1/panel.json).
+ranks: {}
+
+# Friedman omnibus + Nemenyi pairwise post-hoc across (target, split)
+# cells. p-value heatmap per metric + significant-pairs CSV.
+stat_tests:
+  alpha: 0.05
+
+# Hard-split-only summary excluding `random`: means, ranks, and win-rate
+# vs RADIANT across {scaffold, time, cluster, activity_cliff}.
+hard_splits:
+  reference_model: radiant
+
+# Applicability domain: per-test-molecule max Tanimoto to train -> MAE bins
+# (novel/low/medium/high). Joins activities.parquet to recover train SMILES.
+applicability_domain:
+  activities_path: data/processed/v1/activities.parquet
+
+# Confidence-stratified MAE / top-k filtering. Uses Tanimoto-NN-to-train
+# from g_applicability_domain as a confidence proxy (the trained
+# checkpoint's native confidence_var is degenerate due to halting
+# collapse during fine-tuning).
+confidence_filter: {}
+
+# Per-split pairwise win-rate matrices: 5 K x K heatmaps (one per split).
+per_split_winrate: {}
+
+# Per target-family metric breakdown (joins panel.json target_class).
+target_family: {}
+
+# ZINC20 + ChEMBL activity-pretrain curves. The Figure-2 three-stage
+# training story.
+pretrain_curves: {}
+
+# ECE, reliability diagram, top-k confidence MAE filter, parity overlay.
+calibration_extensions: {}
+
+# Scaffold-novelty MAE bins on scaffold split (test scaffold Tanimoto vs
+# train scaffolds).
+scaffold_novelty: {}
+
+# Activity-cliff handling for ALL 5 models (the existing
+# `activity_cliff_sar:` block runs RADIANT-only; this is the comparison.)
+activity_cliff_all_models: {}
+
+# Halting ON (default predictions.csv) vs OFF (G.4 loop_sweep at fixed K)
+# comparison. Pure post-processing; depends on G.4 having run.
+halting_toggle:
+  loops: [1, 2, 4, 8, 12, 16]
+
+# Test-time SMILES augmentation consistency. For each scaffold-split test
+# molecule, predict it under K random SMILES enumerations of the SAME
+# molecule and measure variance. Doubles as a non-degenerate confidence
+# proxy (the native confidence_var is dead due to halting collapse).
+smiles_consistency:
+  config_path: configs/radiant_75m.json
+  vocab_path: data/zinc20/smiles_vocab.json
+  split: scaffold
+  n_augmentations: 5
+  device: cuda
+  batch_size: 64

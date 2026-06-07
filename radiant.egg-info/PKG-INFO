@@ -1,0 +1,511 @@
+Metadata-Version: 2.4
+Name: radiant
+Version: 0.1.0
+Summary: RADIANT: Recurrent Activity-Directed Iterative Architecture for Neural QSAR Training. A recurrent-depth transformer with shared loop core, stable input injection, and adaptive halting for molecular property prediction.
+Author: RADIANT contributors
+License: MIT
+Keywords: pytorch,transformer,recurrent-depth,qsar,cheminformatics,chembl,smiles,radiant
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Classifier: Intended Audience :: Science/Research
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.1
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: pytest-xdist; extra == "dev"
+Provides-Extra: chem
+Requires-Dist: rdkit>=2023.09; extra == "chem"
+Provides-Extra: yaml
+Requires-Dist: pyyaml>=6; extra == "yaml"
+Provides-Extra: data
+Requires-Dist: rdkit>=2023.09; extra == "data"
+Requires-Dist: chembl_structure_pipeline>=1.2.4; extra == "data"
+Requires-Dist: pandas>=2.0; extra == "data"
+Requires-Dist: pyarrow>=14; extra == "data"
+Requires-Dist: joblib>=1.3; extra == "data"
+Provides-Extra: baselines
+Requires-Dist: rdkit>=2023.09; extra == "baselines"
+Requires-Dist: scikit-learn>=1.3; extra == "baselines"
+Requires-Dist: scipy>=1.11; extra == "baselines"
+Requires-Dist: joblib>=1.3; extra == "baselines"
+Requires-Dist: transformers>=4.36; extra == "baselines"
+Requires-Dist: huggingface_hub>=0.20; extra == "baselines"
+Requires-Dist: tokenizers>=0.15; extra == "baselines"
+Provides-Extra: all
+Requires-Dist: rdkit>=2023.09; extra == "all"
+Requires-Dist: chembl_structure_pipeline>=1.2.4; extra == "all"
+Requires-Dist: pandas>=2.0; extra == "all"
+Requires-Dist: pyarrow>=14; extra == "all"
+Requires-Dist: joblib>=1.3; extra == "all"
+Requires-Dist: scikit-learn>=1.3; extra == "all"
+Requires-Dist: scipy>=1.11; extra == "all"
+Requires-Dist: transformers>=4.36; extra == "all"
+Requires-Dist: huggingface_hub>=0.20; extra == "all"
+Requires-Dist: tokenizers>=0.15; extra == "all"
+Requires-Dist: selfies>=2.1; extra == "all"
+Requires-Dist: pyyaml>=6; extra == "all"
+Requires-Dist: pytest>=7; extra == "all"
+Dynamic: license-file
+
+# RADIANT
+
+**Recurrent Activity-Directed Iterative Architecture for Neural QSAR Training**
+
+A recurrent-depth transformer for molecular property prediction, targeting publication in *Nature Machine Intelligence*. RADIANT processes SMILES through a weight-shared iterative refinement core with adaptive halting, attention pooling, and depth-adaptive representations, pretrained on 870M ZINC20 + ChEMBL molecules and evaluated across a 20-target panel against Morgan/RF, ChemBERTa-2, MolFormer, and GIN baselines.
+
+---
+
+## Architecture
+
+```
+input_ids ──► StemEncoder ──► e ──► h₀ = e
+                                      │
+                 ┌────► for t in range(n_loops):
+                 │       sₜ        = IterationSignal(t)
+                 │       pre_core   = norm(h + sₜ)
+                 │       core_out   = SharedCore(pre_core)         # weight-shared
+                 │       core_out   = IterationAdapter(core_out, t)
+                 │       h          = h + βₜ · core_out + γₜ · Anchor(e)
+                 │       (ConfidenceHalting freezes converged tokens)
+                 └─────────────────────────────────────────────
+                                      │
+                             h ──► ExitDecoder ──► RMSNorm
+                                      │
+                          ┌───────────┴───────────┐
+                     AttentionPool            DepthAdaptivePool
+                          │                       │
+                       TaskHead               TaskHead
+```
+
+**Key components:**
+
+| Module | Role |
+|---|---|
+| `StemEncoder` | Token + positional embedding (once) |
+| `IterativeRefinementCore` | Weight-shared transformer blocks applied N times |
+| `StateAnchorUpdate` | Stable recurrence: `h_{t+1} = h_t + β·Core(h_t) + γ·Anchor(e)` |
+| `ConfidenceHalting` | PonderNet-style adaptive depth per token |
+| `AttentionPooling` | Learnable query-based pooling over pharmacophore-relevant atoms |
+| `DepthAdaptivePool` | Weights intermediate hidden states by halting probabilities |
+| `ExitDecoder` | Projects to output space (once) |
+
+The same checkpoint can be evaluated at any loop count, trading compute for accuracy at inference time. Sinusoidal iteration signals enable extrapolation beyond the training loop count.
+
+---
+
+## 3-Stage Training Pipeline
+
+```
+Stage 1: SMILES MLM + Contrastive pretrain (870M ZINC20 + ChEMBL)
+    └── Learns chemistry: full SMILES, scaffolds, R-groups, functional groups
+         ↓
+Stage 2: Multi-target activity pretrain (1.57M activities, 7,913 targets)
+    └── Learns bioactivity: target-conditioned SAR plus Murcko R-group views
+         ↓
+Stage 3: Single-target fine-tune (per-target, head warmup + cosine schedule)
+    └── Specializes to a single endpoint with pretrained backbone
+```
+
+---
+
+## Install
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate                    # Windows
+# source .venv/bin/activate              # Linux / macOS
+
+pip install -e ".[all]"                   # everything
+# pip install -e .                       # core only
+# pip install -e ".[data]"              # + data curation
+# pip install -e ".[baselines]"         # + all baselines
+# pip install -e ".[dev]"              # + pytest
+
+pytest -q                                # smoke test
+```
+
+CUDA is optional for the test suite but required for training.
+
+---
+
+## Repository Layout
+
+```
+RADIANT/
+├── radiant/                     # Core architecture (domain-agnostic)
+│   ├── config.py                  # RadiantConfig (frozen dataclass)
+│   ├── model.py                   # RadiantModel (top-level forward)
+│   ├── stem_encoder.py            # StemEncoder
+│   ├── refinement_core.py         # IterativeRefinementCore
+│   ├── state_anchor.py            # StateAnchorUpdate
+│   ├── confidence_halting.py      # ConfidenceHalting + HaltingTrace
+│   ├── exit_decoder.py            # ExitDecoder
+│   ├── attention.py               # GQA with RoPE
+│   ├── feedforward.py             # SwiGLU + optional MoE
+│   ├── heads.py                   # LMHead, RegressionHead, PoolingHead
+│   └── ...
+│
+├── radiant_chem/                # Chemistry-specific wrapper
+│   ├── config.py                  # RadiantChemConfig
+│   ├── model_chem.py              # RadiantChemModel + task heads
+│   ├── tokenizer.py               # SMILES tokenizer
+│   ├── depth_pool.py              # DepthAdaptivePool
+│   ├── augment.py                 # SMILES randomization
+│   └── ...
+│
+├── radiant_qsar/                # QSAR pipeline
+│   ├── data/                      # Phase A: ChEMBL 36 data curation
+│   ├── splits/                    # Phase B: random, scaffold, time, cluster, activity_cliff
+│   ├── pretrain/                  # Stage 1 + 2: MLM, contrastive, activity pretrain
+│   ├── finetune/                  # Stage 3: single-target + panel sweep
+│   ├── baselines/                 # Morgan/RF, ChemBERTa-2, MolFormer, GIN
+│   ├── analyses/                  # Phase G: depth-vs-complexity, calibration, attribution
+│   ├── screening/                 # Phase H: 28 filters, 10 profiles, ML scoring
+│   ├── eval/                      # Prediction writer, halting extras
+│   └── reproduce/                 # Reproducibility bundle
+│
+├── training/                    # Generic Trainer + callbacks
+├── configs/                     # JSON architecture presets
+├── examples/                    # 7 runnable demos (no data needed)
+├── tests/                       # 230+ tests, CPU-only
+└── data/                        # Produced by pipeline (not committed)
+```
+
+---
+
+## Pipeline Commands
+
+All paths are relative to the repo root.
+
+### Step 0: Place ChEMBL 36 SQLite
+
+Download from [EBI](https://ftp.ebi.ac.uk/pub/databases/chembl/ChEMBLdb/releases/chembl_36/) and place as `chembl_36.db` at the repo root.
+
+### Step 1: Data Curation
+
+```bash
+python -m radiant_qsar.data.run_phase_a \
+    --db             chembl_36.db \
+    --raw-dir        data/raw \
+    --processed-dir  data/processed/v1 \
+    --n-jobs         48
+```
+
+Produces 1,567,570 curated activities across 7,913 targets and 953,701 compounds.
+
+### Step 2: Build Tokenizer Vocab
+
+```bash
+python -m radiant_qsar.data.build_vocab \
+    --compounds   data/processed/v1/compounds.parquet \
+    --out         data/processed/v1/smiles_vocab.json \
+    --kind        smiles \
+    --min-count   3
+```
+
+### Step 3: Stage 1 — SMILES Pretrain (ZINC20 + ChEMBL, 870M molecules)
+
+Build the merged corpus, rebuild vocab for new tokens, then pretrain:
+
+```bash
+# Build corpus
+python -m radiant_qsar.pretrain.zinc_corpus build \
+    --zinc-dir data/zinc20 \
+    --chembl data/processed/v1/compounds.parquet \
+    --out data/zinc20/corpus.txt \
+    --jobs 48 \
+    --resume
+
+# Rebuild vocab (preserves old token IDs for checkpoint compatibility)
+python -m radiant_qsar.pretrain.zinc_corpus vocab \
+    --corpus data/zinc20/corpus.txt \
+    --old-vocab data/processed/v1/smiles_vocab.json \
+    --out data/zinc20/smiles_vocab.json \
+    --sample 10000000
+
+# Pretrain
+python -m radiant_qsar.pretrain.pretrain_loop \
+    --corpus            data/zinc20/corpus.txt \
+    --vocab             data/zinc20/smiles_vocab.json \
+    --config            configs/radiant_75m.json \
+    --out               checkpoints/pretrain \
+    --steps             500000 \
+    --batch-size        64 \
+    --lr                3e-4 \
+    --warmup-steps      2000 \
+    --scaffold-contrastive-weight 0.05 \
+    --rgroup-contrastive-weight 0.05 \
+    --rgroup-mlm-weight 0.25 \
+    --n-loops-train     8 \
+    --curriculum-loops \
+    --bf16 \
+    --device            cuda
+```
+
+Put all ZINC20 tranche files directly under `data/zinc20/`; the builder discovers `.smi`, `.smiles`, `.txt`, `.csv`, and `.gz` files. For large ZINC20 folders, prefer `--jobs N --resume` without `--deduplicate`: it writes resumable per-file clean chunks under `data/zinc20/.corpus.txt.state/` and reuses completed chunks if the run is interrupted. Use `--deduplicate` only for smaller builds with enough RAM, because global deduplication keeps a SMILES set in memory and therefore runs sequentially.
+
+The 75M-parameter model (`d_model=640, 8 heads, 4 KV heads, 4/4/4 blocks`) trains MLM + InfoNCE on randomized SMILES pairs. By default it also derives Murcko scaffold and side-chain/R-group SMILES views and trains scaffold/R-group contrastive plus R-group MLM auxiliary losses. For corpora over 2GB, the loader automatically streams with a 500K shuffle buffer.
+
+**Smoke test first** (5 min, CPU):
+
+```bash
+python -m radiant_qsar.pretrain.pretrain_loop \
+    --compounds data/processed/v1/compounds.parquet \
+    --vocab     data/processed/v1/smiles_vocab.json \
+    --config    configs/radiant_tiny.json \
+    --out       checkpoints/pretrain_smoke \
+    --steps     500 --batch-size 16 --device cpu --num-workers 0
+```
+
+### Step 4: Stage 2 — Multi-Target Activity Pretrain
+
+Trains on all 1.57M ChEMBL activities with target-conditioned regression, bridging chemistry knowledge to bioactivity understanding.
+By default this stage also derives Murcko scaffold side-chain/R-group SMILES and adds an auxiliary activity loss on that R-group view, so the shared backbone is pushed to learn substituent-level SAR rather than only full-molecule strings.
+
+```bash
+python -m radiant_qsar.pretrain.activity_pretrain \
+    --activities   data/processed/v1/activities.parquet \
+    --vocab        data/zinc20/smiles_vocab.json \
+    --config       configs/radiant_75m.json \
+    --stage1-ckpt  checkpoints/pretrain/latest.pt \
+    --out          checkpoints/activity_pretrain \
+    --epochs       10 \
+    --batch-size   128 \
+    --lr           5e-5 \
+    --rgroup-aux-weight 0.25 \
+    --device       cuda
+```
+
+### Step 5: Stage 3 — Single-Target Fine-Tune
+
+Fine-tuning uses head warmup (freeze backbone for 5 epochs, train head at 1e-3), attention pooling, depth-adaptive pooling, SMILES augmentation, and cosine scheduling with layer-wise LR decay.
+
+```bash
+python -m radiant_qsar.finetune.single_task \
+    --activities    data/processed/v1/activities.parquet \
+    --target        CHEMBL279 \
+    --vocab         data/zinc20/smiles_vocab.json \
+    --config        configs/radiant_75m.json \
+    --pretrain-ckpt checkpoints/activity_pretrain/backbone_for_finetune.pt \
+    --out           runs/panel/radiant/CHEMBL279/scaffold \
+    --split         scaffold \
+    --epochs        100 \
+    --batch-size    16 \
+    --lr            2e-5 \
+    --pooling-kind  attention \
+    --use-depth-pool \
+    --head-warmup-epochs 5 \
+    --disable-halting-loss \
+    --smiles-augment-prob 0.50 \
+    --device        cuda
+```
+
+### Step 6: Panel Sweep — 20 Targets x 5 Splits
+
+```bash
+# Select panel (20 targets across 7 ChEMBL classes)
+python -m radiant_qsar.finetune.select_panel \
+    --activities data/processed/v1/activities.parquet \
+    --targets    data/processed/v1/targets.parquet \
+    --out        data/processed/v1/panel.json
+
+# Pre-compute splits (optional but recommended)
+python -m radiant_qsar.splits.precompute \
+    --panel      data/processed/v1/panel.json \
+    --activities data/processed/v1/activities.parquet \
+    --splits     random scaffold time cluster activity_cliff
+
+# Run sweep (all models, all splits)
+python -m radiant_qsar.finetune.sweep \
+    --panel         data/processed/v1/panel.json \
+    --activities    data/processed/v1/activities.parquet \
+    --vocab         data/zinc20/smiles_vocab.json \
+    --config        configs/radiant_75m.json \
+    --pretrain-ckpt checkpoints/activity_pretrain/backbone_for_finetune.pt \
+    --out           runs/panel \
+    --splits        random scaffold time cluster activity_cliff \
+    --models        radiant morgan_rf chemberta molformer gin \
+    --head-warmup-epochs 5 \
+    --disable-halting-loss \
+    --device cuda
+```
+
+The sweep is resumable: existing cells are skipped on restart.
+
+### Step 7: Phase G — Publication Analyses
+
+```bash
+python -m radiant_qsar.analyses.run_phase_g --config configs/phase_g.yaml
+```
+
+Publication analyses covering the five compute-aware claims plus reviewer-facing SAR checks:
+
+| Analysis | Claim | What it produces |
+|---|---|---|
+| G.0 Validation metrics | — | MAE/RMSE/R2/Pearson heatmaps, parity plots |
+| G.1 Depth vs complexity | C1 | Effective depth vs MW/BertzCT/FCSP3 correlation |
+| G.3 Calibration | C3 | ECE, Brier, reliability diagrams |
+| G.4 Loop sweep | C4 | Test-time scaling at n_loops 1..16 |
+| G.5 Atom attribution | C5 | Per-atom halt heatmaps + gradient attribution |
+| Pairwise wins | — | Head-to-head win rates across all cells |
+| R-group SAR | reviewer control | Same-scaffold substituent delta/sign accuracy |
+| Activity-cliff SAR | reviewer control | High-similarity cliff delta/sign accuracy |
+| Failure modes | reviewer control | Worst molecules, cells, scaffolds, and R-groups |
+| Stage-1 representation probe | reviewer control | Scaffold/R-group embedding enrichment |
+| R-group ablation | reviewer control | Pure-model no-R-group objective comparison |
+
+### Step 8: Virtual Screening
+
+```bash
+python -m radiant_qsar.screening.prepare_library \
+    --input    library.smi \
+    --output   filtered.smi \
+    --profile  kinase \
+    --summary  summary.json
+```
+
+28 filters across 7 categories, 10 built-in profiles. RADIANT integrates as an ML scoring filter:
+
+```python
+from radiant_qsar.screening import Pipeline, get_filter
+from radiant_qsar.screening.filters.ml_scoring import RADIANTPotency
+
+pipe = Pipeline([
+    get_filter("lipinski"),
+    get_filter("pains"),
+    RADIANTPotency(
+        checkpoint_path="runs/panel/radiant/CHEMBL279/scaffold/best.pt",
+        vocab_path="data/zinc20/smiles_vocab.json",
+        min_pchembl=7.0,
+        n_loops=8,
+    ),
+])
+pipe.run("library.smi", "hits.smi")
+```
+
+### Production Orchestrator
+
+For the pure-RADIANT path, use the resumable reproduction driver. It keeps
+long jobs opt-in and gates screening on a selected validated RADIANT checkpoint:
+
+```bash
+# Stage 1 + Stage 2 + RADIANT-only 20-target panel + selection
+STAGES=d,d2,panel,select bash radiant_qsar/reproduce/run_all.sh
+
+# Pure-RADIANT ablations for the mechanistic claims
+STAGES=ablate bash radiant_qsar/reproduce/run_all.sh
+
+# Add baselines only for comparison, not fusion
+STAGES=f bash radiant_qsar/reproduce/run_all.sh
+
+# Reviewer-facing internal controls
+STAGES=leak,cal,stats bash radiant_qsar/reproduce/run_all.sh
+
+# Run Phase G once runs/panel_75m exists
+STAGES=g bash radiant_qsar/reproduce/run_all.sh
+
+# Run the extra SAR/error analyses individually
+STAGES=rgsar,cliffsar,failures,rgroupabl bash radiant_qsar/reproduce/run_all.sh
+
+# Screen with the selected RADIANT checkpoint
+INPUT_LIBRARY=library.smi STAGES=h bash radiant_qsar/reproduce/run_all.sh
+```
+
+The selection manifest is written to
+`runs/screening/selected_radiant_model.json` and is produced by:
+
+```bash
+python -m radiant_qsar.finetune.select_checkpoint \
+    --panel-root runs/panel_75m \
+    --target CHEMBL279 \
+    --split scaffold \
+    --metric pearson \
+    --vocab data/processed/v1/smiles_vocab.json \
+    --out runs/screening/selected_radiant_model.json
+```
+
+---
+
+## Quick Demos (No Data Required)
+
+```bash
+python examples/forward_pass.py            # forward pass, loop metrics
+python examples/train_lm_synthetic.py      # 1-min CPU LM training
+python examples/analyze_loop_dynamics.py   # per-loop norms, halting
+python examples/ablate_loop_count.py       # eval-time loop count ablation
+python examples/baseline_transformer.py    # comparison architectures
+python examples/train_chem_property.py     # toy regression
+```
+
+---
+
+## Configs
+
+| File | Params | d_model | Use |
+|---|---:|---:|---|
+| `configs/radiant_tiny.json` | ~130K | 64 | Tests, smoke runs |
+| `configs/radiant_75m.json` | ~75M | 640 | Full training (all stages) |
+| `configs/radiant_base.json` | ~30-50M | 512 | Intermediate scale |
+
+Generate configs programmatically:
+
+```python
+from radiant import small_config
+small_config(d_model=256, n_loops_train=6).to_json("configs/custom.json")
+```
+
+---
+
+## Tests
+
+```bash
+pytest -q                            # full suite (~2 min, CPU only)
+pytest -q tests/qsar/                # QSAR pipeline only
+pytest -q tests/test_independence.py # originality scan
+```
+
+230+ tests covering core architecture, chem wrapper, training scaffold, data pipeline, all split strategies, baselines, screening, and analyses. No external services or GPU required.
+
+---
+
+## Baselines
+
+| Model | Params | Type | Notes |
+|---|---:|---|---|
+| Morgan/RF | — | Fingerprint + Random Forest | CPU-only, offline |
+| ChemBERTa-2 | 77M | Pretrained transformer | HuggingFace, ~150MB download |
+| MolFormer | 110M | Pretrained transformer | HuggingFace, ~440MB download |
+| GIN | 1-3M | Graph neural network | Pure PyTorch, no PyG/DGL |
+
+All baselines share identical CLI interface, output schema (`result.json`, `predictions.csv`), and integrate into the panel sweep.
+
+---
+
+## Publication Strategy
+
+**Headline claim:** Adaptive recurrent depth correlates with molecular complexity, yielding parameter-efficient, well-calibrated, test-time-scalable QSAR.
+
+Five falsifiable sub-claims (C1-C5) covering depth-complexity correlation, parameter efficiency, calibration, test-time scaling, and per-atom interpretability. Full plan at [`docs/qsar_plan.md`](docs/qsar_plan.md).
+
+---
+
+## Citation
+
+```bibtex
+@software{radiant2026,
+  title  = {RADIANT: Recurrent Activity-Directed Iterative Architecture
+            for Neural QSAR Training},
+  year   = {2026},
+}
+```
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

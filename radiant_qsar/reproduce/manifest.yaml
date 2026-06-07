@@ -1,0 +1,307 @@
+# RADIANT-QSAR reproducibility manifest.
+#
+# This file is the single source of truth for everything a reader needs
+# to reconstruct the published numbers: the upstream DB, the curated
+# data release, every pinned dependency version, every checkpoint, and
+# the exact command (and seed) that produced each artifact.
+#
+# When you update a downstream artifact -- a new pretrain checkpoint, a
+# re-run baseline, a new Phase G figure -- update the matching block
+# here in the same commit. The smoke test under
+# `tests/qsar/test_reproduce_manifest.py` enforces that this file is
+# valid YAML and that every referenced local path exists.
+#
+# Anything left as `TBD:` means "produced in a later phase"; the four
+# Phase I steps walk through how to fill them in.
+
+study:
+  name: RADIANT-QSAR
+  version: 0.1.0                     # bump per submission round
+  paper_title: >-
+    Adaptive-depth recurrent transformers learn to allocate computation
+    in proportion to molecular complexity
+  primary_claim_ids: [C1, C2, C3, C4, C5]
+  primary_journal: Nature Machine Intelligence
+  fallback_journals:
+    - Nature Communications
+    - Nature Computational Science
+    - Journal of Chemical Information and Modeling
+  preprint_targets: [chemrxiv, arxiv-cs.LG]
+
+# -------------------------------------------------------------------------
+# Compute environment
+# -------------------------------------------------------------------------
+environment:
+  os: Linux (WSL2, openSUSE Leap 16.0)
+  conda_distribution: miniforge3
+  conda_env_name: qsar
+  python: "3.11.15"
+  cuda:
+    runtime: "12.9"          # from torch.version.cuda inside the env
+    driver_min: "570.x"      # NVIDIA driver shipped with CUDA 12.8/12.9
+  gpu: 1x 24-48 GB CUDA GPU
+  ram_min_gb: 32              # 32+ recommended for the Phase A SQL extract
+  disk_min_gb: 100            # ChEMBL DB + raw + processed + checkpoints + runs
+
+# -------------------------------------------------------------------------
+# Pinned dependency versions (observed in the active qsar env).
+# -------------------------------------------------------------------------
+dependencies:
+  torch: "2.4.1+cu121"         # observed in the active WSL qsar env
+  numpy: "2.4.6"
+  pandas: "2.2.3"
+  scipy: "1.17.1"
+  scikit-learn: "1.8.0"
+  matplotlib: "3.9.2"
+  seaborn: "0.13.2"
+  pyarrow: "17.0.0"
+  pyyaml: "6.0.2"
+  rdkit: "2024.03.5"
+  chembl_structure_pipeline: "1.2.4"   # ChEMBL's official standardizer
+  selfies: ">=2.1"
+  transformers: "5.8.1"        # used by chemberta + molformer baselines
+  tokenizers: "0.22.2"
+  huggingface_hub: "1.14.0"
+  joblib: "1.5.3"
+
+# -------------------------------------------------------------------------
+# Upstream data source.
+# -------------------------------------------------------------------------
+data_source:
+  chembl:
+    version: 36
+    file: chembl_36.db
+    size_gb: 29
+    counts:
+      activities: 24_300_000
+      compounds:  2_850_000
+      targets:    17_800
+    download_root: https://www.ebi.ac.uk/chembl/
+
+# -------------------------------------------------------------------------
+# Phase A -- curated data release.
+# Hashes mirror data/processed/v1/manifest.json one-for-one so a stale
+# release here trips the smoke test immediately.
+# -------------------------------------------------------------------------
+data_release:
+  path: data/processed/v1/
+  release_tag: "radiant-qsar/data/processed/v1"
+  build_time_utc: "2026-05-07T18:23:36Z"
+  zenodo_doi: TBD                  # mint at Phase I.1
+  curated_counts:
+    activities: 1_567_570
+    unique_compounds: 953_701
+    unique_targets: 7_913
+  files:
+    activities.parquet:
+      sha256: 71a39b507a213f658a147a55ab2690229ed7b70859be2a17531b1d9494348700
+      size_bytes: 39020579
+    compounds.parquet:
+      sha256: f69a399f526423548d5b1fa750692382fd61cc2bb0aa2118a3471cb4ab1390ff
+      size_bytes: 51222028
+    descriptors.parquet:
+      sha256: c1deb4bee7ccba70123f9ba684fa0ead928e9b41474589303ac48218df5b041d
+      size_bytes: 64205791
+    targets.parquet:
+      sha256: 127e8050c8f329f7fa6f4cadce307f3681c4cc8ed2cd11730b95407ea37b03d7
+      size_bytes: 209814
+
+# -------------------------------------------------------------------------
+# Phase C -- tokenizer vocab.
+# -------------------------------------------------------------------------
+tokenizer:
+  kind: SmilesTokenizer
+  vocab_path: data/processed/v1/smiles_vocab.json
+  built_from: data/processed/v1/compounds.parquet
+  notes: >-
+    Atom-level regex tokenizer; deterministic given the input corpus.
+    The full schema, including pad/bos/eos/mask/unk specials, is loaded
+    via SmilesTokenizer.load().
+
+# -------------------------------------------------------------------------
+# Phase D -- pretraining.
+# -------------------------------------------------------------------------
+pretrain:
+  config: configs/radiant_75m.json
+  base_config_dump: checkpoints/pretrain_75m/base_config.json
+  chem_config_dump: checkpoints/pretrain_75m/chem_config.json
+  checkpoint_root: checkpoints/pretrain_75m/
+  best_checkpoint: TBD             # fill in after training completes
+  total_steps_target: 200_000
+  total_steps_observed: 0          # update at every fresh save
+  effective_batch: 256
+  optimizer:
+    name: AdamW
+    lr: 3.0e-4
+    weight_decay: 0.1
+    betas: [0.9, 0.95]
+    warmup_steps: 2000
+    schedule: cosine
+  precision: bf16
+  loop_schedule:
+    kind: CurriculumLoopSchedule
+    start: 2
+    end: 4
+    rampup_steps: 65_000
+  seeds_used: [0]
+  huggingface_release: TBD         # mint at Phase I.1
+  wallclock_hours: TBD
+
+# -------------------------------------------------------------------------
+# Phase E -- fine-tuning.
+# -------------------------------------------------------------------------
+finetune:
+  protocols:
+    single_task:
+      driver: radiant_qsar.finetune.single_task
+      epochs_max: 50
+      early_stop_metric: val_pearson
+      seeds_per_target: 5
+    multi_task:
+      driver: radiant_qsar.finetune.multi_task     # planned
+    multi_task_admet:
+      driver: radiant_qsar.finetune.admet_hub      # optional / scope-flex
+  panel:
+    spec_file: data/processed/v1/panel.json
+    targets_n: 20
+    splits: [random, scaffold, time, cluster, activity_cliff]
+    runs_root: runs/panel_75m/
+  status: in_progress
+
+# -------------------------------------------------------------------------
+# Phase F -- baselines (re-trained at parity).
+# Each baseline has its own runs/<baseline>/<target>/<split>/result.json.
+# We don't repeat per-run hashes here -- Phase I.1 will produce a Zenodo
+# bundle of every result.json + predictions.csv tarball.
+# -------------------------------------------------------------------------
+baselines:
+  parity_rule: same data, same splits, same seeds, same GPU-hours per cell
+  re_trained:
+    - morgan_rf
+    - chemberta_30m
+    - molformer_30m
+    - gin
+  radiant_ablations_available:
+    - radiant_no_halting
+    - radiant_no_anchor
+    - radiant_no_adapter
+    - radiant_no_depth_pool
+    - radiant_fixed_loops
+    - radiant_no_smiles_aug
+    - radiant_linear_head
+  pending:
+    - kpgt_small
+    - chemprop_dmpnn
+    - unimol2_2d_30m
+    - shared_depth_ut          # universal-transformer ablation
+    - radiant_ensemble_5     # for C3 calibration parity
+  literature_referenced_separately:
+    - molformer_xl_100m
+
+# -------------------------------------------------------------------------
+# Phase G -- compute-aware analyses.
+# Each entry maps to one module under radiant_qsar/analyses/.
+# -------------------------------------------------------------------------
+phase_g:
+  out_dir: runs/phase_g/
+  orchestrator_config: configs/phase_g.yaml
+  modules:
+    g1_depth_vs_complexity:
+      claim: C1
+      module: radiant_qsar.analyses.g1_depth_vs_complexity
+      descriptors: [MolWt, NumRotatableBonds, NumRings, FractionCSP3, BertzCT, SAscore_proxy]
+    g3_calibration:
+      claim: C3
+      module: radiant_qsar.analyses.g3_calibration
+      uncertainty_sources:
+        - radiant_halt_var
+        - radiant_mc_loops
+        - ensemble_5
+    g4_test_time_loop_sweep:
+      claim: C4
+      module: radiant_qsar.analyses.g4_test_time_loop_sweep
+      n_loops: [1, 2, 4, 8, 12, 16, 24]
+    g5_atom_attribution:
+      claim: C5
+      module: radiant_qsar.analyses.g5_atom_attribution
+      n_case_studies: 8
+    g_pairwise_wins:
+      claim: cross_cutting
+      module: radiant_qsar.analyses.g_pairwise_wins
+      bootstrap_resamples: 10_000
+    g_compute_parity:
+      claim: cross_cutting
+      module: radiant_qsar.analyses.g_compute_parity
+      bootstrap_resamples: 10_000
+      label_perm_resamples: 200
+    g_rgroup_sar:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.g_rgroup_sar
+      output: same_scaffold_rgroup_delta_sign_accuracy
+    g_activity_cliff_sar:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.g_activity_cliff_sar
+      output: high_similarity_activity_cliff_delta_sign_accuracy
+    g_failure_modes:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.g_failure_modes
+      output: worst_molecules_cells_scaffolds
+    g_stage1_representation_probe:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.g_stage1_representation_probe
+      output: scaffold_rgroup_embedding_enrichment
+    g_rgroup_ablation:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.g_rgroup_ablation
+      output: pure_model_rgroup_objective_ablation
+    leakage_audit:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.leakage_audit
+    statistical_significance:
+      claim: reviewer_control
+      module: radiant_qsar.analyses.statistical_significance
+  combined_report: runs/phase_g/PHASE_G_REPORT.md
+
+# -------------------------------------------------------------------------
+# Phase H -- virtual-screening case study.
+# -------------------------------------------------------------------------
+screening:
+  status: filters_coded             # the prospective retrospective study is pending
+  filter_pipeline_module: radiant_qsar.screening.prepare_library
+  library_candidates:
+    - Enamine REAL Diversity (1 M subset)
+    - ZINC22 in-stock subset
+  target_candidate_set:
+    - EGFR
+    - JAK2
+    - BTK
+    - CDK2
+  selection_rationale: most data-rich human kinase with a recent disclosed prospective hit set
+  output_root: runs/screening/
+
+# -------------------------------------------------------------------------
+# Tests.
+# -------------------------------------------------------------------------
+tests:
+  framework: pytest
+  root: tests/
+  totals_at_last_release: { passed: 274, skipped: 0, failed: 0 }
+  smoke_subsets:
+    phase_g: tests/qsar/test_phase_g_smoke.py
+    sar_analyses: tests/qsar/test_sar_analyses.py
+    reproduce: tests/qsar/test_reproduce_manifest.py
+
+# -------------------------------------------------------------------------
+# Submission bundle (Phase I.1) -- filled in at submission time.
+# -------------------------------------------------------------------------
+bundle:
+  zenodo_record_id: TBD
+  zenodo_doi: TBD
+  github_release_tag: TBD          # e.g. v0.2.0-nmi-submission
+  github_release_url: TBD
+  huggingface_pretrain_repo: TBD
+  huggingface_multitask_repo: TBD
+  chemrxiv_doi: TBD
+  arxiv_id: TBD
+  cover_letter: paper/cover_letter.tex     # to be authored
+  response_template: paper/response_to_reviewers_template.md

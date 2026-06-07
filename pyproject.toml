@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radiant"
+version = "0.1.0"
+description = "RADIANT: Recurrent Activity-Directed Iterative Architecture for Neural QSAR Training. A recurrent-depth transformer with shared loop core, stable input injection, and adaptive halting for molecular property prediction."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "RADIANT contributors" }]
+keywords = ["pytorch", "transformer", "recurrent-depth", "qsar", "cheminformatics", "chembl", "smiles", "radiant"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "pytest-xdist"]
+chem = ["rdkit>=2023.09"]
+yaml = ["pyyaml>=6"]
+
+# Phase A data curation
+data = [
+    "rdkit>=2023.09",
+    "chembl_structure_pipeline>=1.2.4",
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "joblib>=1.3",
+]
+
+# All five Phase F baselines
+baselines = [
+    "rdkit>=2023.09",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "joblib>=1.3",
+    "transformers>=4.36",          # ChemBERTa + MolFormer
+    "huggingface_hub>=0.20",       # transitive of transformers, pinned for clarity
+    "tokenizers>=0.15",
+]
+
+# Convenience: everything for a full single-GPU NMI workflow.
+all = [
+    "rdkit>=2023.09",
+    "chembl_structure_pipeline>=1.2.4",
+    "pandas>=2.0",
+    "pyarrow>=14",
+    "joblib>=1.3",
+    "scikit-learn>=1.3",
+    "scipy>=1.11",
+    "transformers>=4.36",
+    "huggingface_hub>=0.20",
+    "tokenizers>=0.15",
+    "selfies>=2.1",
+    "pyyaml>=6",
+    "pytest>=7",
+]
+
+[tool.setuptools]
+packages = ["radiant", "radiant_chem", "radiant_qsar", "training"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
